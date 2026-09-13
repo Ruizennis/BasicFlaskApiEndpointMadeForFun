@@ -4,7 +4,7 @@ import json
 import datetime
 app = Flask(__name__)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True # pretty print
-
+app.url_map.strict_slashes = False
 items = [
     {"id": 1, "Name": "Name1", "Cost": 10},
     {"id": 2, "Name": "Name2", "Cost": 15}
@@ -124,6 +124,32 @@ code {{
         </ul>
     </dd>
 </dl>
+<h3> /api/datetime/ </h3>
+<hr>
+<dl>
+    <dt>/api/datetime/</dt>
+    <dd>Fetch Date And Time In The RFC 5322 date-time Format (Methods: GET)</dd>
+    <dd>Example Response (JSON) {{"Date&Time":"Sun, 13 Sep 2026 10:53:14 GMT"}}</dd>
+    <dd>
+        <strong>Optional Parameters:</strong>
+        <ul>
+            <li>?data=text / ?data=plaintext: Returns raw text instead of JSON</li>
+            <li>?format=YYYY-MM-DD: returns YYYY-MM-DD format (No Time)
+            <li>?format=ISO8601: Returns Time & Date In The ISO 8601 Format (YYYY-MM-DDTHH:mm:ssZ)
+        </ul>
+    </dd>
+</dl>
+<h3> /api/all/ </h3>
+<hr>
+<dl>
+    <dt> /api/all </dt>
+    <dd> Return All Api Urls And Their Methods (Methods: GET)</dd>
+</dl>
+<h3> /api/rebound/ </h3>
+<dl>
+    <dt> /api/rebound/ </dt>
+    <dd> Returns Client IP Headers And Other Data Sent To The Server, Data Is Not logged (Methods: GET, POST) </dd>
+</dl>
 <hr>
     <h3>Database Contents <small style='Opacity: 0.5'> Last Fetched {fetched_time}</small></h3>
 
@@ -142,7 +168,19 @@ code {{
 
     '''
     return HTML, 200
-
+@app.route('/api')
+def HTML():
+    LOC = request.url
+    html = f'''
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<head>
+<title>Flask Coding Challange API</title>
+<h1>Whoops! You Seem To Be At The Wrong Location :(</h1>
+<h2> Perhaps you were looking for the api list or documentation? If so use one of the links bellow :) </p>
+<p><a href="/api/all">Get Api List</a></p>
+<p><a href="/">Return to the Homepage</a></p>
+    '''
+    return html, 404
 @app.route('/sitemap.txt', methods=['GET'])
 def simple_sitemap():
     urls = []
@@ -158,7 +196,24 @@ def simple_sitemap():
     text_content = "\n".join(sorted(urls))
     return text_content, 200, {'Content-Type': 'text/plain'}
 
+@app.route('/api/all', endpoint="api_all_root")
+def returnall():
+    routes = []
+    for route in app.url_map.iter_rules():
 
+        if route.endpoint in ['api_root', 'api_all_root', 'sitemap', 'static']:
+            continue
+        if not route.rule.startswith('/api'):
+            continue
+
+        routes.append({
+            "Name": route.rule,
+            "Methods": list(route.methods - {"HEAD", "OPTIONS"})
+        })
+    return jsonify({
+            "AmountOfApiUrls": len(routes),
+            "Urls": routes
+        }), 200
 
 @app.route('/api/items/all')
 def returnall():
@@ -260,7 +315,7 @@ def updateitem(ItemId):
 
 
 
-@app.route('/api/ip/', methods=['GET'])
+@app.route('/api/ip', methods=['GET'])
 def returnpubip():
     header = request.headers.get('X-Forwarded-For')
     if header:
@@ -277,6 +332,52 @@ def returnpubip():
         return response, 200, {'Content-Type': 'application/javascript'}
     else:
         return jsonify({"Ip": IP}), 200
+
+@app.route('/api/datetime', methods=['GET'])
+def returntime():
+    datatype = request.args.get("data")
+    formatting = request.args.get("format")
+    if formatting == 'YYYY-MM-DD':
+        time = datetime.date.today().strftime('%Y-%m-%d')
+    elif formatting == 'ISO8601':
+        time = datetime.datetime.now().isoformat()
+    else:
+        time = datetime.datetime.now()
+    if datatype == 'text' or datatype == 'plaintext':
+        return str(time), 200
+    else:
+        return jsonify({"DateTime": time}), 200
+
+@app.route('/api/rebound', methods=['GET', 'POST'])
+def rebound():
+    header = request.headers.get('X-Forwarded-For')
+    if header:
+        IP = header.split(',')[0].strip()
+    else:
+        IP = request.remote_addr
+    if request.method == 'POST':
+        return jsonify({
+            "Type": "POST",
+            "args": request.args,
+            "data": request.data.decode('utf-8') if request.data else "",
+            "ClientIp": IP,
+            "headers": dict(request.headers),
+            "formdata": request.form,
+            "jsondata": request.get_json(silent=True),
+            "url": request.url
+        }), 200
+    elif request.method == 'GET':
+        return jsonify({
+            "Type": "GET",
+            "args": request.args,
+            "headers": dict(request.headers),
+            "ClientIp": IP,
+            "url": request.url
+        }), 200
+    else:
+        return jsonify({"Code": 405, "Message/Reason": f"Invalid Method \"{request.method}\""}), 405
+
+
 @app.route("/404.html")
 def fourOfour():
     return render_template('404.html'), 404
