@@ -1,9 +1,16 @@
-from flask import Flask, jsonify, request, url_for, render_template
+from flask import Flask, jsonify, request, url_for, render_template, g, send_file
 import sqlite3
 import json
 import datetime
+import io
+try:
+    import qrcode
+    import qrcode.image.svg
+    NOT_QRCODE = False
+except ImportError:
+    NOT_QRCODE = True
 app = Flask(__name__)
-app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True # pretty print
+app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True # auto pretty print json data
 app.url_map.strict_slashes = False
 items = [
     {"id": 1, "Name": "Name1", "Cost": 10},
@@ -11,9 +18,17 @@ items = [
 ]
 
 def initdbconnection():
-    conn = sqlite3.connect("db.db")
-    conn.row_factory = sqlite3.Row
-    return conn
+    if 'db' not in g:
+        g.db = sqlite3.connect("db.db")
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+@app.teardown_appcontext
+def close_db(exception=None):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
+
 
 def makedbifnotexist():
     conn = initdbconnection()
@@ -24,7 +39,7 @@ def makedbifnotexist():
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INTEGER PRIMARY KEY,
             Name TEXT NOT NULL,
             Cost REAL NOT NULL
         )
@@ -38,12 +53,10 @@ def makedbifnotexist():
             records_to_insert
         )
         print("Database initialized and default items seeded!")
-
     conn.commit()
-    conn.close()
 
-
-makedbifnotexist()
+with app.app_context():
+    makedbifnotexist()
 
 @app.route("/")
 def homepage():
@@ -53,15 +66,25 @@ def homepage():
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM items")
         rows = cursor.fetchall()
-        conn.close()
         DICT = [dict(row) for row in rows]
         formatted_db = json.dumps(DICT, indent=4,sort_keys=False)
     except Exception as errormsg:
-        formatted_db = f"Failed To Fetch Data :(\n Reason: {errormsg}"
+        formatted_db = f"Failed To Fetch Data :(\n Reason: {errormsg}, maybe try deleteing the DB and trying to run the app twice?"
     HTML = f'''
 <head>
 <title>Flask API Endpoint Coding Challange</title>
 <style>
+footer a, footer a:visited {{
+    color: #0969da;            
+    text-decoration: underline; 
+    display: inline-block;   
+    margin: 0 15px;           
+}}
+
+footer a:hover {{
+    color: blue;               
+}}
+
 h1 {{
     color: blue;
 }}
@@ -97,8 +120,8 @@ code {{
 </head>
 <h1>Avalilable API URls / Docs </h1>
 <h2> All API Data Should Be Returned In JSON Format Unless Specified Manualy</h2>
-<h3> /api/items/ </h3>
 <hr>
+<h3> /api/items/ </h3>
 <dl>
     <dt> /api/items/all </dt>
     <dd> Show All Items In The DB </dd>
@@ -125,7 +148,6 @@ code {{
     </dd>
 </dl>
 <h3> /api/datetime/ </h3>
-<hr>
 <dl>
     <dt>/api/datetime/</dt>
     <dd>Fetch Date And Time In The RFC 5322 date-time Format (Methods: GET)</dd>
@@ -134,22 +156,36 @@ code {{
         <strong>Optional Parameters:</strong>
         <ul>
             <li>?data=text / ?data=plaintext: Returns raw text instead of JSON</li>
-            <li>?format=YYYY-MM-DD: returns YYYY-MM-DD format (No Time)
-            <li>?format=ISO8601: Returns Time & Date In The ISO 8601 Format (YYYY-MM-DDTHH:mm:ssZ)
+            <li>?format=YYYY-MM-DD: returns YYYY-MM-DD format (No Time)</li>
+            <li>?format=ISO8601: Returns Time & Date In The ISO 8601 Format (YYYY-MM-DDTHH:mm:ssZ) </li>
         </ul>
+       	<strong>Note:</strong> Invalid data or format parameters are ignored (defaults: json data and RFC 5322 date-time Format. )
     </dd>
 </dl>
 <h3> /api/all/ </h3>
-<hr>
 <dl>
     <dt> /api/all </dt>
     <dd> Return All Api Urls And Their Methods (Methods: GET)</dd>
 </dl>
 <h3> /api/rebound/ </h3>
 <dl>
-    <dt> /api/rebound/ </dt>
+    <dt> /api/rebound/rebound & /api/rebound </dt>
     <dd> Returns Client IP Headers And Other Data Sent To The Server, Data Is Not logged (Methods: GET, POST) </dd>
+    <dt> /api/rebound/cookies </dt>
+    <dd> Returns Client Cookies (Methods: GET)</dt>
 </dl>
+<h3> /api/qrcode </h3>
+<dl>
+    <dt> /api/qrcode (Method: GET) </dt>
+    <dd> Returns a ascii / svg qrcode based on sent data </dd>
+    <dd>
+        <dd> The data parameter is required, this is the data embeded in the qrcode </dd>
+        <strong>Optional Parameters:</strong>
+        <ul>
+            <li>?format=text or ?format=plaintext: Returns Qrcode in plain text </li>
+        </ul>
+       	<strong>Note:</strong> Invalid format parameters are ignored (default: SVG)
+    </dd>
 <hr>
     <h3>Database Contents <small style='Opacity: 0.5'> Last Fetched {fetched_time}</small></h3>
 
@@ -162,7 +198,7 @@ code {{
 
     <footer>
     <h5> Users Are Never Logged When Using These Api Urls </h5>
-    <a href="/sitemap.txt">SiteMap</a>
+    <a href="/sitemap.txt">SiteMap</a>    <a href="/api/all">All Apis </a> <a href="javascript:window.print()">Print API Docs</a> <a href="/robots.txt">Robots</a>
     </footer>
 </dl>
 
@@ -216,12 +252,11 @@ def returnall():
         }), 200
 
 @app.route('/api/items/all')
-def returnall():
+def returnalltwo():
     conn = initdbconnection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM items")
     rows = cursor.fetchall()
-    conn.close()
     db_items = [dict(row) for row in rows]
     return jsonify(db_items)
 
@@ -231,7 +266,6 @@ def ItemLookup(ItemId):
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM items WHERE id = ?", (ItemId,))
     row = cursor.fetchone()
-    conn.close()
     if row:
         return jsonify(dict(row)), 200
 
@@ -240,10 +274,11 @@ def ItemLookup(ItemId):
 def add_item():
     item_name = request.args.get('name')
     item_cost = request.args.get('cost')
-    if not item_name or not item_cost:
+    if item_name == None or item_cost == None:
         return jsonify({
             "Code": 400,
-            "Message/Reason": "Invalid Parameters, Please Provide ?name=...&cost=..."
+            "Message/Reason": "Invalid Parameters, Please Provide ?name=...&cost=...",
+            "Params": request.args
         }), 400
     try:
         float(item_cost)
@@ -257,21 +292,18 @@ def add_item():
     cursor.execute("INSERT INTO items (Name, Cost) VALUES (?, ?)", (item_name, item_cost))
     ID = cursor.lastrowid
     conn.commit()
-    conn.close()
+    url = url_for('ItemLookup', ItemId=ID, _external=True)
     return jsonify({
-        "Code": 200,
+        "Code": 201,
         "message": f"Successfully added '{item_name}' to the database with Id {ID}"
-    }), 200
+    }), 201, {"Location": url}
 @app.route('/api/items/delete/<int:itemid>', methods=['DELETE'])
 def removeitem(itemid):
-    if not itemid:
-        return jsonify({"Code": 400, "Message/Reason": "Malformed Request, Ensure /<ID>/ is included in your request"}), 400
     conn = initdbconnection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM items WHERE id = ?", (itemid,))
     conn.commit()
     row_del = cursor.rowcount
-    conn.close()
     if row_del == 0:
         return jsonify({
             "Code": 404,
@@ -287,12 +319,10 @@ def updateitem(ItemId):
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM items WHERE id = ?", (ItemId,))
     if not cursor.fetchone():
-        conn.close()
         return jsonify({"Code": 400, "Message/Reason": "ID Not Found On DB."}), 400
     item_name = request.args.get('name')
     item_cost = request.args.get('cost')
     if not item_cost and not item_name:
-        conn.close()
         return jsonify({"Code": 400, "Message/Reason": "Ensure One or more parameter is added to be updated. (name or cost)"}), 400
     if item_name and item_cost:
         cursor.execute("UPDATE items SET Name = ?, Cost = ? WHERE id = ?", (item_name, item_cost, ItemId))
@@ -301,7 +331,6 @@ def updateitem(ItemId):
     else:
         cursor.execute("UPDATE items SET Cost = ? WHERE id = ?", (item_cost, ItemId))
     conn.commit()
-    conn.close()
     if item_name and item_cost:
         changes = f"Name to '{item_name}' and Cost to {item_cost}"
     elif item_name:
@@ -327,11 +356,11 @@ def returnpubip():
     if formatting in ('text', 'plaintext'):
         return IP
     elif callback:
-        data = {"Ip": IP}
+        data = {"ip": IP}
         response = f"{callback}({json.dumps(data)});"
         return response, 200, {'Content-Type': 'application/javascript'}
     else:
-        return jsonify({"Ip": IP}), 200
+        return jsonify({"ip": IP}), 200
 
 @app.route('/api/datetime', methods=['GET'])
 def returntime():
@@ -349,6 +378,7 @@ def returntime():
         return jsonify({"DateTime": time}), 200
 
 @app.route('/api/rebound', methods=['GET', 'POST'])
+@app.route('/api/rebound/rebound', methods=['GET', 'POST'])
 def rebound():
     header = request.headers.get('X-Forwarded-For')
     if header:
@@ -374,13 +404,66 @@ def rebound():
             "ClientIp": IP,
             "url": request.url
         }), 200
-    else:
-        return jsonify({"Code": 405, "Message/Reason": f"Invalid Method \"{request.method}\""}), 405
 
-
+@app.route("/api/rebound/cookies")
+def returncookies():
+    return jsonify({"Cookies": request.cookies}), 200
+@app.route("/api/qrcode")
+def returnQR():
+    DATA = request.args.get("data")
+    FORMAT = request.args.get("format")
+    if NOT_QRCODE:
+        return jsonify({"Code": 501, "Message/Reason": "This Server Does Not Have /api/qrcode Configured or qrcode is not installed"}), 501
+    if not DATA:
+        return jsonify({"Code": 400, "Message/Reason": "No Data was entered, please ensure your request contains ?data=..."}), 400
+    if FORMAT:
+        FORMAT = FORMAT.upper()
+    if FORMAT in ["TEXT", "PLAINTEXT"]:
+        qr = qrcode.QRCode(
+            version=1,
+            box_size=10,
+            border=1
+        )   
+        qr.add_data(DATA)
+        qr.make(fit=True)
+        buffer = io.StringIO()
+        qr.print_ascii(out=buffer)
+        OUT = buffer.getvalue()
+        return OUT, 200
+    qr = qrcode.QRCode(
+        version=1,
+        box_size=10,
+        border=4,
+        image_factory=qrcode.image.svg.SvgImage,
+    )
+    qr.add_data(DATA)
+    qr.make(fit=True)
+    img = qr.make_image()
+    buffer = io.BytesIO()
+    img.save(buffer)
+    buffer.seek(0)
+    return send_file(buffer, mimetype="image/svg+xml")
+@app.route("/robots.txt", methods=["GET"])
+def robots():
+    fallback = "User-agent: *\nDisallow: /api*\nDisallow: /db.db\n\nSitemap: /sitemap.txt"
+    try:
+        with open("robots.txt") as F:
+            return F.read(), 200, {'Content-Type': 'text/plain'}
+    except:
+        return fallback, 200, {'Content-Type': 'text/plain'}
 @app.route("/404.html")
 def fourOfour():
     return render_template('404.html'), 404
 @app.errorhandler(404)
 def page_not_found(error):
     return render_template('404.html'), 404
+@app.errorhandler(405)
+def method_not_allowed(error):
+    return jsonify({"Code": 405, "Message/Reason": "Invalid Method!", "Method": request.method}), 405
+@app.errorhandler(Exception)
+def handleerr(error):
+    app.logger.error(f"An unexpected Error occured. {error}")
+    return jsonify({
+        "Code": 500,
+        "Message/Reason": "An internal server error occurred."
+    }), 500
